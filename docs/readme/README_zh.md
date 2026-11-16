@@ -78,6 +78,8 @@ Linux 上的 Ghidra、JADX、固件工具启动和静态 JavaScript/Electron 分
 npx rea-agents setup
 ```
 
+> Ubuntu VPS: [Run REA on an Ubuntu VPS](../getting-started/ubuntu-vps.md)
+
 选择智能体，检查计划中的变更并批准。设置流程会添加 REA 的 MCP 服务和匹配的工作流指引，并备份已有配置。完成后重启智能体。
 
 设置流程支持 Claude Code、Codex、Cursor、Gemini CLI、Grok Build 和[其他智能体](../getting-started/installation.md#supported-agents)。提供方配置和手动注册 MCP 的方法见[安装与设置](../getting-started/installation.md)。

@@ -83,6 +83,8 @@ Cu Node.js și npm instalate, rulează:
 npx rea-agents setup
 ```
 
+> Ubuntu VPS: [Run REA on an Ubuntu VPS](../getting-started/ubuntu-vps.md)
+
 Alege agenții, verifică modificările propuse și aprobă-le. Configurarea adaugă
 serverul MCP REA și instrucțiunile corespunzătoare pentru fluxul de lucru,
 creând copii de siguranță ale configurației existente. Repornește apoi agentul.

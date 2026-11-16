@@ -83,6 +83,8 @@ Node.js aur npm installed hon to yeh command chalayein:
 npx rea-agents setup
 ```
 
+> Ubuntu VPS: [Run REA on an Ubuntu VPS](../getting-started/ubuntu-vps.md)
+
 Apne agents select karein, proposed changes dekhein aur approve karein. Setup
 REA ka MCP server aur matching workflow instructions add karta hai, aur existing
 configuration ke backups banata hai. Iske baad apna agent restart karein.

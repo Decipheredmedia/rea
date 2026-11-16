@@ -78,6 +78,8 @@ Une fois Node.js et npm installés, exécutez :
 npx rea-agents setup
 ```
 
+> Ubuntu VPS: [Run REA on an Ubuntu VPS](../getting-started/ubuntu-vps.md)
+
 Choisissez vos agents, vérifiez les modifications proposées et approuvez-les. Setup ajoute le serveur MCP de REA et les instructions de workflow correspondantes, et sauvegarde la configuration existante. Redémarrez ensuite votre agent.
 
 Setup prend en charge Claude Code, Codex, Cursor, Gemini CLI, Grok Build et [d'autres agents](../getting-started/installation.md#supported-agents). Consultez [Installation et configuration](../getting-started/installation.md) pour la configuration des fournisseurs et l'enregistrement MCP manuel.

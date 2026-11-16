@@ -78,6 +78,8 @@ REA подключает вашего агента к инструментам �
 npx rea-agents setup
 ```
 
+> Ubuntu VPS: [Run REA on an Ubuntu VPS](../getting-started/ubuntu-vps.md)
+
 Выберите агентов, проверьте предлагаемые изменения и подтвердите их. Настройка добавляет MCP-сервер REA и соответствующие рабочие инструкции, сохраняя резервные копии существующих настроек. После этого перезапустите агента.
 
 Настройка поддерживает Claude Code, Codex, Cursor, Gemini CLI, Grok Build и [других агентов](../getting-started/installation.md#supported-agents). Настройка провайдеров и ручная регистрация MCP описаны в разделе [установка и настройка](../getting-started/installation.md).

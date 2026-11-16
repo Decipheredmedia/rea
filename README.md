@@ -60,54 +60,162 @@
 
 ---
 
-See a feature in an app that you want in your own product? Ask your agent to investigate it with REA. It can inspect the app without its source code, explain how the feature works, show the evidence, and build a version for your project.
+## What is REA?
 
-REA connects your agent to tools for inspecting native binaries, JavaScript and Electron apps, .NET assemblies, and websites. You can also use the same tools from your terminal. Analysis runs locally, and results include the evidence and limitations behind each conclusion.
+Ever used an app or website and wondered "how did they build that?" REA helps
+you find out.
 
-Setup registers REA with your agent and installs matching workflow instructions. Native analysis can use an existing Hopper, Ghidra, IDA or Kuna installation; setup can optionally install Hopper with approval. Static JavaScript analysis needs no native analysis engine.
+REA gives your AI agent (such as Claude Code, Cursor or Codex) a toolbox for
+looking inside finished software: websites, desktop apps, phone apps and
+programs. You ask a question in plain words, for example "how does the search
+box on this site work?" Your agent uses REA to look, explains what it found,
+shows the evidence behind each conclusion, and can build a similar feature for
+your own project.
 
-> **[Visit the REA website](https://rea.tools/)** for setup instructions, illustrated guides, and real case studies.
+A few things to know:
 
-## Quick start
+- **It runs on your machine.** REA analyzes everything locally and uploads
+  nothing. Your agent sees the results, and the agent's AI provider has its own
+  data policy.
+- **It shows its work.** Every answer comes with evidence, plus anything REA
+  could not determine.
+- **You can start without extra tools.** Websites and JavaScript or Electron
+  apps work out of the box. Deeper analysis of compiled programs uses an
+  optional analysis engine: Hopper, Ghidra, IDA or Kuna. Setup can install
+  Hopper for you if you approve.
 
-On Linux, Ghidra, JADX, firmware tool launches and static JavaScript/Electron
-analysis require a procps-compatible system `ps` for process ownership
-checks. Recovery steps are in `docs/getting-started/installation.md` under
-"Linux owned-process prerequisite".
+> **[Visit the REA website](https://rea.tools/)** for illustrated guides and
+> real case studies.
 
-### Set up your agent
+## How REA works
 
-With Node.js and npm installed, run:
+1. You ask your agent a question about an app or website.
+2. Your agent calls REA's tools to inspect it.
+3. REA returns what it found and the evidence for it.
+4. Your agent explains the answer, digs further, or writes and tests code for you.
+
+The same tools are also available as terminal commands.
+
+![REA investigation flow: your agent asks about a local target, REA inspects and traces it using analysis tools, and the agent uses the returned code, references and unknowns to explain, implement and test.](website/public/assets/figures/rea-investigation-flow.svg)
+
+[Open the full-size figure](website/public/assets/figures/rea-investigation-flow.svg).
+
+## Install and set up
+
+### What you need
+
+- **Node.js and npm.** REA needs Node.js 22.x (22.23.4 or newer), 24.x (24.22.1
+  or newer), or 26.12.1 or newer; 24 is recommended. Check with
+  `node --version`. If you don't have it, download it from nodejs.org.
+- **An AI agent** that can use MCP tools, such as Claude Code, Codex, Cursor or
+  Gemini CLI. See the [supported agents](docs/getting-started/installation.md#supported-agents).
+- **Chrome or another Chromium-family browser** if you want to study websites.
+
+### Option A: Your own computer (Mac, Windows or Linux)
+
+<a id="quick-start"></a>
+
+Run one command:
 
 ```bash
 npx rea-agents setup
 ```
 
-Choose your agents, review the proposed changes, and approve them. Setup adds
-REA's MCP server and matching workflow instructions, with backups of existing
-configuration. Restart your agent afterward. Setup records the selected runtime and REA
-entry script directly. If acquired through a package runner, keep its cache entry
-available. Run package acquisition from a trusted directory outside the target
-project. Installation and recovery details are in the setup guide below.
+What happens:
 
-Setup supports Claude Code, Codex, Cursor, Gemini CLI, Grok Build and
-[other agents](docs/getting-started/installation.md#supported-agents). See
-[installation and setup](docs/getting-started/installation.md) for provider configuration,
-manual MCP registration, Claude Code/Codex plugins, and the Cursor Marketplace
-plugin.
+1. Setup asks which of your agents should use REA.
+2. It shows every change it plans to make and waits for your **yes**.
+3. It adds REA to each agent's settings, backs up each settings file first, and
+   installs REA's instructions for the agent.
+4. **Restart your agent.** REA's tools are then available.
 
-MCP advertises compact input schemas to reduce context overhead; guidance a
-compact schema omits follows the tool description. The full tool set and
-canonical server validation are unchanged. See "Compact input schema profile"
-in the MCP contracts guide.
+Run the command from a folder you trust, outside the project you want to study.
+Setup remembers where REA was downloaded, so keep that npm download cache.
+Details are in the [installation and setup guide](docs/getting-started/installation.md).
 
-Output schemas are omitted from `tools/list` by default: no model API reads
-them, and REA validates every result itself. Set
-`REA_MCP_OUTPUT_SCHEMA_PROFILE=compact` to advertise each output schema within
-a 4,096-byte budget. Both settings keep canonical server-side validation and
-complete structured results. See "Output schemas" in the MCP contracts guide.
+### Option B: An Ubuntu server (VPS)
+
+REA works on Ubuntu 22.04 and 24.04 servers. The short version, as `root` or
+with `sudo`:
+
+```sh
+# 1. Basics, then Node.js 24 (Ubuntu's own Node.js is too old)
+sudo apt update && sudo apt install -y curl ca-certificates procps
+curl -fsSL https://deb.nodesource.com/setup_24.x -o nodesource_setup.sh
+sudo bash nodesource_setup.sh && sudo apt install -y nodejs
+
+# 2. REA itself
+sudo npm install --global rea-agents
+
+# 3. Connect REA to your agent (install your agent on the server first)
+rea setup
+```
+
+For websites, install Google Chrome. If you log in as `root`, run setup this
+way so REA can start Chrome:
+
+```sh
+REA_BROWSER_EXECUTABLE=/usr/bin/google-chrome REA_BROWSER_NO_SANDBOX=true rea setup
+```
+
+The [Ubuntu VPS guide](docs/getting-started/ubuntu-vps.md) explains every step,
+including installing Chrome, using REA from your laptop over SSH, and fixing
+common problems.
+
+### Optional: analysis engines for compiled programs
+
+To read the code inside compiled programs (for example `.exe` files, Mac apps
+or Linux binaries), REA uses an analysis engine you install:
+
+| Engine | Cost             | How REA finds it                                              |
+| ------ | ---------------- | ------------------------------------------------------------- |
+| Hopper | Paid, with demo  | `rea setup` can install it after you approve                  |
+| Ghidra | Free             | Set `GHIDRA_INSTALL_DIR` to the extracted Ghidra 12.1+ folder |
+| IDA    | Paid             | Set `REA_IDA_MCP_CONFIG` (the IDA guide is linked below)      |
+| Kuna   | See vendor terms | Set `REA_KUNA_COMMAND` (the Kuna guide is linked below)       |
+
+Websites and JavaScript/Electron apps do not need any of these.
+
+### Settings in plain terms
+
+REA is configured with environment variables: named settings you type before
+a command, such as `GHIDRA_INSTALL_DIR=/opt/ghidra rea setup`. When you set
+one before running `rea setup`, setup saves it into your agent's REA
+registration, so it applies every time the agent starts REA. Common ones:
+
+| Setting                  | What it does                                               |
+| ------------------------ | ---------------------------------------------------------- |
+| `REA_BROWSER_EXECUTABLE` | Which browser REA starts for website tasks                 |
+| `REA_BROWSER_NO_SANDBOX` | `true` lets Chrome run as `root` (needed on many servers)  |
+| `GHIDRA_INSTALL_DIR`     | Where Ghidra is installed                                  |
+| `HOPPER_LAUNCHER_PATH`   | Where Hopper's launcher is, if it isn't in the usual place |
+| `REA_JADX_MCP_JAR`       | The JADX bridge file used for Android apps                 |
+
+`REA_MCP_OUTPUT_SCHEMA_PROFILE=compact` also sends your agent short
+descriptions of each tool's results. Leaving it unset is the default and uses
+fewer tokens. REA checks every result either way.
+
+On Linux, REA also needs the standard `ps` command (package `procps`) to keep
+track of the programs it starts. Most systems already have it.
+
+### Check that it works
+
+```sh
+rea doctor
+```
+
+This lists what REA can use. Entries marked `missing_analysis_engine` are
+optional engines you haven't installed. Websites and JavaScript apps still
+work. If your agent's registration shows a problem, run setup again and restart
+the agent. The [Documentation](#documentation) section links the full
+troubleshooting guide, and the [FAQ](#faq) explains how to add REA to an agent
+by hand.
+
+## Use REA
 
 ### Ask your agent
+
+Describe what you want in plain words:
 
 ```text
 Understand how search works in the Notes app, show me the evidence, and build a
@@ -116,80 +224,66 @@ similar feature for my project.
 
 Replace Notes with your target app and the feature you want to understand.
 
+To study a website, open it in a Chrome window started with
+`--remote-debugging-port=9222` and a separate profile, then tell your agent to
+use the browser on port 9222. On a server, REA can also start its own invisible
+browser. The website row in [What you can analyze](#what-you-can-analyze)
+links the full guide.
+
 ### Use the terminal
 
-Inspect an extracted JavaScript/Electron app directory or ASAR:
+Analyze an unpacked JavaScript or Electron app folder, or an `.asar` file:
 
 ```bash
 npx -y rea-agents@latest analyze-javascript-application /absolute/path/to/app --json
 ```
 
-The result includes modules, imports, Electron boundaries and their evidence.
-Replace the path with your target, such as `"D:/apps/example"` on Windows.
+The result lists the app's modules, imports and Electron connections, with
+evidence. Replace the path with your own, such as `"D:/apps/example"` on
+Windows.
 
-To install the `rea` command for regular use:
+To install the `rea` command permanently:
 
 ```bash
 npm install --global rea-agents
 rea --help
 ```
 
-For native analysis, configure a provider first. See the
-[CLI and Evidence guide](docs/getting-started/cli.md) for native commands, provider selection,
-snapshots and scripting.
+For compiled programs, set up an analysis engine first. The
+[CLI and Evidence guide](docs/getting-started/cli.md) covers every command.
 
-### Update REA
+## Update REA
 
-REA changes quickly, and new releases include frequent bug fixes. Keep your
-installation up to date.
+REA changes quickly and new versions fix bugs often, so update regularly.
 
-For a CLI installed with `npm install --global` or `bun add --global`:
+If you installed with `npm install --global` or `bun add --global`:
 
 ```bash
 rea update
 ```
 
-`rea --update` is an alias for this verified workflow and accepts the same global
-output flags. Use `rea update` when combining it with other command controls.
+`rea --update` does the same. Bun users need Bun 1.2.17 or later. Then run the
+setup command that the update prints, to refresh your agents.
 
-Updater commands retain at most 4 MiB of stdout and stderr combined. Oversized
-metadata replies are rejected after the command exits; verbose installs continue
-with bounded diagnostics. Human progress output respects terminal backpressure
-and waits for submitted writes to finish.
-
-Bun global updates require Bun 1.2.17 or later. With an older Bun release,
-upgrade Bun manually before running `rea update`.
-
-To refresh your agent registrations and skill, run the setup command printed
-by the update.
-
-If you use `npx`, update your agent setup with:
+If you use `npx`:
 
 ```bash
 npx rea-agents@latest setup
 ```
 
-Review the setup changes and restart your agent. For one-off CLI commands,
-use `npx rea-agents@latest` followed by the command. With Bun, use
-`bunx rea-agents@latest` in place of `npx rea-agents@latest`.
+Review the changes and restart your agent. For one-off commands, use
+`npx rea-agents@latest` followed by the command, or `bunx rea-agents@latest`
+with Bun.
 
-## How REA works
-
-Your agent calls REA through MCP to inspect the target and trace relevant code.
-REA returns findings with their evidence. The agent uses them to ask follow-up
-questions, explain the behavior, or write and test an implementation.
-CLI commands use the same workflows.
-
-![REA investigation flow: your agent asks about a local target, REA inspects and traces it using analysis tools, and the agent uses the returned code, references and unknowns to explain, implement and test.](website/public/assets/figures/rea-investigation-flow.svg)
-
-[Open the full-size figure](website/public/assets/figures/rea-investigation-flow.svg).
+On a server installed with `sudo npm install --global`, run
+`sudo npm install --global rea-agents@latest`, then `rea setup`.
 
 <a id="current-status"></a>
 
 ## What you can analyze
 
-REA requires Node.js 22.x (>=22.23.4), 24.x (>=24.22.1), or 26.12.1+, plus npm.
-Additional tools and host support depend on the target:
+This table lists everything REA can look inside. The last column says what
+extra software, if any, each kind of target needs, and links to its guide.
 
 | Target                  | What REA returns                                                                                  | Requirements and guide                                                                                                                                               |
 | ----------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -233,28 +327,27 @@ Additional tools and host support depend on the target:
 | PyInstaller executables | CArchive members, Python version, entry scripts and extracted bytecode                            | None (static only); [Python packaged applications](docs/python-packaged-applications.md)                                                                             |
 | Deno compile binaries   | Virtual files, entry point, recorded options, npm snapshot length                                 | None (static only); [Deno compile executables](docs/deno-standalone.md)                                                                                              |
 
-Static JavaScript and .NET inspection read the supplied files without running
-the application. Runtime capture runs or interacts with the selected target
-using your user permissions; each runtime guide describes its effects.
+**Looking vs. running.** For most targets REA only reads the files and never
+runs the app. Tools that capture runtime behavior do run or interact with the
+target, using your user permissions; each runtime guide describes what it does.
 
-For offline native-binary inspection, REA also supports caller-supplied GNU
-objdump and Rizin. See the [reverse-engineering tools guide](docs/reverse-engineering-tools.md)
-for provider setup, CLI commands, and Evidence limitations. REA does not install
-or update either provider.
+For compiled programs, REA can also use GNU objdump and Rizin if you have them.
+See the [reverse-engineering tools guide](docs/reverse-engineering-tools.md).
+REA never installs or updates these for you.
 
 <a id="choosing-a-deep-analysis-provider"></a>
 
-Native formats and host support vary by provider. See
-[Hopper and Ghidra setup](docs/getting-started/installation.md#hopper), the
+**Choosing an analysis engine.** Each engine supports different file types and
+systems. See [Hopper and Ghidra setup](docs/getting-started/installation.md#hopper), the
 [IDA guide](docs/providers/ida-provider.md) (including an optional native MCP bridge), the
 [Kuna decompiler guide](docs/kuna-provider.md), and
 [experimental Windows Ghidra support](docs/providers/windows-ghidra-p0.md).
-Ghidra also supports [16-bit DOS analysis](docs/providers/ghidra-dos.md).
-For large binaries, raise the provider's startup deadline with
+Ghidra can also read [16-bit DOS programs](docs/providers/ghidra-dos.md).
+If a large program times out while opening, give the engine more time with
 `REA_GHIDRA_STARTUP_TIMEOUT_MS` or `REA_HOPPER_STARTUP_TIMEOUT_MS`.
-For provider selection, see the [CLI guide](docs/getting-started/cli.md#choose-a-provider).
-Check [release availability](docs/getting-started/installation.md#released-package-and-main)
-for features added since the latest npm release.
+To choose between engines, see the [CLI guide](docs/getting-started/cli.md#choose-a-provider).
+Some features may be newer than the latest npm release; check
+[release availability](docs/getting-started/installation.md#released-package-and-main).
 
 ## Showcases
 
@@ -348,30 +441,30 @@ REA can also build an environment of a Linux desktop app, which an agent uses th
 <details>
 <summary><strong>Which agents can use REA?</strong></summary>
 
-Any agent that supports local MCP servers. Setup configures the
-[supported agents](docs/getting-started/installation.md#supported-agents); other clients can use
-[manual MCP registration](docs/getting-started/installation.md#mcp-registry).
+Any agent that can use local MCP servers (MCP is the standard way agents plug
+in tools). Setup handles the
+[supported agents](docs/getting-started/installation.md#supported-agents) for you.
+For any other agent, follow [manual MCP registration](docs/getting-started/installation.md#mcp-registry).
 
 </details>
 
 <details>
-<summary><strong>Do I need a native analysis engine?</strong></summary>
+<summary><strong>Do I need an analysis engine?</strong></summary>
 
-Deep native analysis uses Hopper, Ghidra, IDA or Kuna, depending on the target
-and operation. Static JavaScript and .NET inspection work without a native
-analysis engine. Setup can install Hopper after approval; Ghidra, IDA and Kuna
-use your existing installations. See [provider setup](docs/getting-started/installation.md#hopper)
-for the options and their supported targets.
+Only to read the code inside compiled programs. For that, REA uses Hopper,
+Ghidra, IDA or Kuna, depending on the program. Websites, JavaScript/Electron
+apps and .NET programs work without one. Setup can install Hopper if you
+approve. Ghidra, IDA and Kuna use copies you install yourself. See
+[engine setup](docs/getting-started/installation.md#hopper).
 
 </details>
 
 <details>
 <summary><strong>Do I need to start Hopper first?</strong></summary>
 
-REA starts Hopper when an operation needs it. On macOS, a first-run dialog may
-ask you to choose demo mode or activate your license. Complete that prompt in the
-same user session before your first CLI/MCP operation or unattended job. Open
-Hopper manually if needed. See
+No. REA starts Hopper when it needs it. On a Mac, the first launch may ask you
+to choose demo mode or enter a license. Answer that prompt once, as the same
+user, before your first REA task. Open Hopper by hand if needed. See
 [Hopper startup and troubleshooting](docs/getting-started/installation.md#launcher-paths-and-troubleshooting).
 
 </details>
@@ -379,65 +472,68 @@ Hopper manually if needed. See
 <details>
 <summary><strong>What does installing the skill from skills.sh do?</strong></summary>
 
-The skill supplies investigation instructions for your agent. Use `npx rea-agents setup`
-to register REA's MCP server and install the matching instructions, then restart
-your agent. See [skill-only installation](docs/getting-started/installation.md#skill-only-installation).
+The skill only gives your agent instructions for investigations. It doesn't
+connect the tools. Run `npx rea-agents setup` to connect REA and install the
+matching instructions, then restart your agent. See
+[skill-only installation](docs/getting-started/installation.md#skill-only-installation).
 
 </details>
 
 <details>
 <summary><strong>What code does REA return?</strong></summary>
 
-Native analysis returns pseudocode and assembly. JavaScript/Electron analysis
-recovers modules and their relationships. Your agent uses these findings to
-write and test an implementation; the [showcases](#showcases) give worked examples.
+For compiled programs: pseudocode (readable code rebuilt from the program) and
+assembly. For JavaScript/Electron apps: the app's modules and how they connect.
+Your agent uses these to write and test its own version. The
+[showcases](#showcases) show complete examples.
 
 </details>
 
 <details>
 <summary><strong>Does REA upload my app?</strong></summary>
 
-REA analyzes targets locally. Your agent receives the tool results, and its
-model provider has its own data policy.
+No. REA analyzes everything on your machine. Your agent receives the results,
+and the agent's AI provider has its own data policy.
 
 </details>
 
 <details>
 <summary><strong>What should I do if I hit a bug?</strong></summary>
 
-Update first; a recent release may already fix it.
+Update first: a newer version may already fix it.
 
-For a CLI installed with `npm install --global` or `bun add --global`:
+If you installed with `npm install --global` or `bun add --global`:
 
 ```bash
 rea update
 ```
 
-For agent setup through `npx`:
+If you set up your agent with `npx`:
 
 ```bash
 npx rea-agents@latest setup
 ```
 
-If you're using an agent, complete the [setup refresh](#update-rea) and restart
-it. Retry the same task. If the problem persists, [open an issue](https://github.com/morluto/rea/issues)
-with your REA version, target type, steps to reproduce and error output.
+When you use an agent, finish the [setup refresh](#update-rea) and restart it.
+Then retry the same task. If the problem is still there,
+[open an issue](https://github.com/morluto/rea/issues) with your REA version,
+what you were analyzing, the steps to reproduce it and the error message.
 
 </details>
 
 ## Documentation
 
-Start with the website's [worked guides](https://rea.tools/guides/).
-For exact options, prerequisites and result contracts:
+New to REA? Start with the website's [illustrated guides](https://rea.tools/guides/).
+For every option and detail:
 
-- [Installation and setup](docs/getting-started/installation.md): agent registration, provider configuration, updates and uninstall.
-- [Readiness and troubleshooting](docs/getting-started/installation.md#check-readiness-for-your-task): diagnose one agent or analysis engine.
-- [CLI and Evidence](docs/getting-started/cli.md): commands, provider selection, snapshots, import/export and exit statuses.
-- [MCP contracts](docs/reference/mcp-contracts.md) and [agent prompts](docs/getting-started/mcp-prompts.md): tool results, sessions and guided investigations.
-- [Tool catalog](docs/reference/mcp-contracts.md#generated-catalog): generated inventory of tools, providers and CLI commands.
-- [Roadmap](docs/development/roadmap.md): planned work and capability trackers.
+- [Installation and setup](docs/getting-started/installation.md): connecting agents, analysis engines, updating and removing REA.
+- [Readiness and troubleshooting](docs/getting-started/installation.md#check-readiness-for-your-task): find out why an agent or engine isn't working.
+- [CLI and Evidence](docs/getting-started/cli.md): terminal commands, choosing an engine, saving and comparing results.
+- [MCP contracts](docs/reference/mcp-contracts.md) and [agent prompts](docs/getting-started/mcp-prompts.md): what each tool returns, and ready-made investigations.
+- [Tool catalog](docs/reference/mcp-contracts.md#generated-catalog): the full, automatically generated list of tools and commands.
+- [Roadmap](docs/development/roadmap.md): what's planned next.
 
-Report vulnerabilities through [SECURITY.md](SECURITY.md).
+Report security problems as described in [SECURITY.md](SECURITY.md).
 
 ## Star history
 

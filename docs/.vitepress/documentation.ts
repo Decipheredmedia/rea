@@ -9,6 +9,11 @@ export const documentationSections = [
         route: "/installation",
       },
       {
+        text: "Run REA on an Ubuntu VPS",
+        source: "getting-started/ubuntu-vps.md",
+        route: "/ubuntu-vps",
+      },
+      {
         text: "Client configuration and troubleshooting",
         source: "getting-started/client-configuration.md",
         route: "/client-configuration",
