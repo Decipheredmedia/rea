@@ -84,6 +84,22 @@ describe("curl installer scenarios", () => {
     expect(await readdir(fixture.temporary)).toEqual([]);
   });
 
+  it("explains how to reach a Linux install directory missing from PATH", async () => {
+    const fixture = await createFixture();
+    const binDirectory = join(fixture.home, ".local/bin");
+    const missing = await runInstaller(fixture, ["--version", "0.3.0"]);
+    expect(missing.stdout).toContain(
+      `This shell cannot find the rea command yet: ${binDirectory} is not on PATH.\n`,
+    );
+    expect(missing.stdout).toContain(`  export PATH=${binDirectory}:"$PATH"\n`);
+
+    const present = await runInstaller(fixture, ["--version", "0.3.0"], {
+      PATH: `${binDirectory}:${fixture.bin}:/usr/bin:/bin`,
+    });
+    expect(present.stdout).toContain("REA 0.3.0 is installed");
+    expect(present.stdout).not.toContain("is not on PATH");
+  });
+
   it("resolves and validates the latest REA release tag", async () => {
     const fixture = await createFixture();
     const result = await runInstaller(fixture);

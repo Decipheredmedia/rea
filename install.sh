@@ -174,6 +174,18 @@ main() {
   [ "$installed_version" = "$version" ] || fail "installed version $installed_version does not match $version. Reinstall the requested version, then retry."
 
   printf 'REA %s is installed.\n' "$version"
+  # Ubuntu's stock root profile never adds ~/.local/bin to PATH, and other
+  # shells add it only at a later login. Explain instead of editing profiles.
+  install_dir="${install_bin%/*}"
+  case ":${PATH}:" in
+    *":${install_dir}:"*) ;;
+    *)
+      printf '\nThis shell cannot find the rea command yet: %s is not on PATH.\n' "$install_dir"
+      printf 'To use rea by name now, run:\n'
+      printf '  export PATH=%q:"$PATH"\n' "$install_dir"
+      printf 'To keep it for future logins, add that line to ~/.bashrc.\n\n'
+      ;;
+  esac
   if [ "$start_setup" = true ] && [ -r /dev/tty ] && [ -w /dev/tty ] && [ -t 1 ] && [ -t 2 ]; then
     printf 'Starting REA setup...\n'
     "$install_bin" setup </dev/tty >/dev/tty
