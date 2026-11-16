@@ -1,0 +1,171 @@
+# Local AI stack: Ollama + Qdrant always; Open WebUI, n8n and ComfyUI are
+# Compose profiles (chat, automation, image) that ./stack turns on and off.
+# Values come from .env, which ./stack install creates. Every port binds to
+# 127.0.0.1 unless BIND_ADDRESS says otherwise; Ollama and Qdrant never leave
+# the server because Ollama has no login.
+name: local-ai-stack
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.16}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-4096}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
+      # The chat model plus the small embedding model used for documents.
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_NO_CLOUD: "1"
+    volumes:
+      - ollama:/root/.ollama
+      - ./.generated:/stack/generated:ro
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT:-11434}:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  qdrant:
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.20.1}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY is missing; run ./stack install}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant:/qdrant/storage
+    ports:
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\r\n\r\n' >&3 && head -n1 <&3 | grep -q ' 200 '
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  open-webui:
+    profiles: [chat]
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      ollama:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      WEBUI_NAME: ${WEBUI_NAME:-Local AI}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY is missing; run ./stack install}
+      OLLAMA_BASE_URL: http://ollama:11434
+      ENABLE_OPENAI_API: "false"
+      DEFAULT_MODELS: ${DEFAULT_MODEL:-coder:latest}
+      # Documents ("chat with your files") are embedded by Ollama and stored in Qdrant.
+      VECTOR_DB: qdrant
+      QDRANT_URI: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+      RAG_EMBEDDING_ENGINE: ollama
+      RAG_EMBEDDING_MODEL: ${EMBED_MODEL:-all-minilm}
+      RAG_OLLAMA_BASE_URL: http://ollama:11434
+      CHUNK_SIZE: "800"
+      CHUNK_OVERLAP: "100"
+      RAG_TOP_K: "4"
+      # Each of these is an extra model call per message; on a CPU they add
+      # seconds to every reply.
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_SEARCH_QUERY_GENERATION: "false"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      ENABLE_WEB_SEARCH: ${ENABLE_WEB_SEARCH:-false}
+      WEB_SEARCH_ENGINE: duckduckgo
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_VERSION_UPDATE_CHECK: "false"
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${WEBUI_PORT:-3000}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 180s
+    deploy:
+      resources:
+        limits:
+          memory: 1200M
+
+  n8n:
+    profiles: [automation]
+    image: ${N8N_IMAGE:-n8nio/n8n:2.47.7}
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      ollama:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?N8N_ENCRYPTION_KEY is missing; run ./stack install}
+      # n8n listens on IPv6 "::" by default and exits on hosts without IPv6.
+      N8N_LISTEN_ADDRESS: 0.0.0.0
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - n8n:/home/node/.n8n
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${N8N_PORT:-5678}:5678"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5678/healthz"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+  comfyui:
+    profiles: [image]
+    build:
+      context: ./comfyui
+      args:
+        COMFYUI_REF: ${COMFYUI_REF:-master}
+    image: local-ai-stack/comfyui:local
+    restart: unless-stopped
+    logging: *logging
+    volumes:
+      - comfyui-models:/opt/ComfyUI/models
+      - comfyui-output:/opt/ComfyUI/output
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${COMFYUI_PORT:-8188}:8188"
+
+volumes:
+  ollama:
+  qdrant:
+  open-webui:
+  n8n:
+  comfyui-models:
+  comfyui-output:

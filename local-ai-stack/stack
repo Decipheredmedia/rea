@@ -1,0 +1,574 @@
+#!/usr/bin/env bash
+# local-ai-stack: install and manage a private AI stack (Ollama, Open WebUI,
+# Qdrant, optional n8n / ComfyUI / OpenClaw) on one Ubuntu server.
+# Run ./stack help for the commands.
+set -Eeuo pipefail
+# Let failures inside $(...) stop the script too, not just in the main shell.
+shopt -s inherit_errexit
+
+STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${STACK_ENV_FILE:-$STACK_DIR/.env}"
+ENV_EXAMPLE="$STACK_DIR/.env.example"
+GENERATED_DIR="$STACK_DIR/.generated"
+BACKUP_DIR="${STACK_BACKUP_DIR:-$STACK_DIR/backups}"
+MEMINFO="${STACK_MEMINFO:-/proc/meminfo}"
+OS_RELEASE="${STACK_OS_RELEASE:-/etc/os-release}"
+PROJECT="${STACK_PROJECT:-local-ai-stack}"
+SECRET_KEYS=(WEBUI_SECRET_KEY QDRANT_API_KEY N8N_ENCRYPTION_KEY)
+# name | prompt file | temperature
+ASSISTANTS=("coder|assistants/coder.md|0.2" "debugger|assistants/debugger.md|0.1")
+ASSUME_YES=false
+
+# ---------------------------------------------------------------- output ----
+if [[ -t 1 ]]; then C_RED=$'\e[31m' C_YEL=$'\e[33m' C_GRN=$'\e[32m' C_BLD=$'\e[1m' C_OFF=$'\e[0m'; else C_RED='' C_YEL='' C_GRN='' C_BLD='' C_OFF=''; fi
+info() { printf '%s==>%s %s\n' "$C_BLD" "$C_OFF" "$*"; }
+ok() { printf '  %sPASS%s %s\n' "$C_GRN" "$C_OFF" "$*"; }
+warn() { printf '  %sWARN%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
+fail() { printf '  %sFAIL%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; }
+die() {
+  printf '%sError:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2
+  exit 1
+}
+
+confirm() {
+  [[ "$ASSUME_YES" == true ]] && return 0
+  [[ -r /dev/tty ]] || die "Cannot ask for confirmation without a terminal; rerun with --yes."
+  local answer
+  read -r -p "$1 [y/N] " answer </dev/tty
+  [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+# --------------------------------------------------------- pure helpers ----
+# Read one /proc/meminfo field (in kB) and print it in MiB.
+meminfo_mib() {
+  local value
+  value="$(awk -v key="$1:" '$1 == key { print int($2 / 1024); found = 1 } END { if (!found) exit 1 }' "$MEMINFO")" ||
+    die "Cannot read $1 from $MEMINFO."
+  printf '%s\n' "$value"
+}
+ram_mib() { meminfo_mib MemTotal; }
+swap_mib() { meminfo_mib SwapTotal; }
+
+# GiB of extra swap to create so small servers survive model loading.
+# Targets 4 GiB of swap below 4 GiB RAM, 2 GiB below 8 GiB RAM, none above.
+swap_plan_gib() {
+  local ram="$1" swap="$2" target
+  [[ "$ram" =~ ^[0-9]+$ && "$swap" =~ ^[0-9]+$ ]] || die "swap_plan_gib needs whole MiB values."
+  if ((ram >= 8192)); then target=0; elif ((ram >= 4096)); then target=2048; else target=4096; fi
+  if ((swap >= target)); then
+    echo 0
+  else
+    echo $(((target - swap + 1023) / 1024))
+  fi
+}
+
+# Minimum MemTotal (MiB) for each optional part. A "2 GB" VPS reports ~1900 MiB.
+profile_min_ram_mib() {
+  case "$1" in
+    chat | automation) echo 1700 ;;
+    image | openclaw) echo 7500 ;;
+    *) die "Unknown part '$1'. Choose chat, automation, image or openclaw." ;;
+  esac
+}
+
+profile_service() {
+  case "$1" in
+    chat) echo open-webui ;;
+    automation) echo n8n ;;
+    image) echo comfyui ;;
+    *) die "'$1' is not a Docker part. Choose chat, automation or image." ;;
+  esac
+}
+
+# Print why a part cannot run on this much RAM, or nothing when it can.
+profile_ram_problem() {
+  local profile="$1" ram="$2" need
+  need="$(profile_min_ram_mib "$profile")" || return 1
+  if ((ram < need)); then
+    case "$profile" in
+      image) printf 'ComfyUI needs about 8 GB of RAM to generate images on a CPU; this server has %s MiB.\n' "$ram" ;;
+      openclaw) printf 'OpenClaw needs a tool-calling model with at least 16K of context; its docs set an 8 GiB floor for local models. This server has %s MiB.\n' "$ram" ;;
+      *) printf '%s needs at least %s MiB of RAM; this server has %s MiB.\n' "$profile" "$need" "$ram" ;;
+    esac
+  fi
+}
+
+# Add or remove a name in a comma-separated list, keeping order and no repeats.
+list_add() {
+  local list="$1" item="$2" out=() part parts
+  IFS=',' read -r -a parts <<<"$list"
+  for part in "${parts[@]}"; do [[ -n "$part" && "$part" != "$item" ]] && out+=("$part"); done
+  out+=("$item")
+  (IFS=','; echo "${out[*]}")
+}
+list_remove() {
+  local list="$1" item="$2" out=() part parts
+  IFS=',' read -r -a parts <<<"$list"
+  for part in "${parts[@]}"; do [[ -n "$part" && "$part" != "$item" ]] && out+=("$part"); done
+  (IFS=','; echo "${out[*]-}")
+}
+list_has() { [[ ",$1," == *",$2,"* ]]; }
+
+valid_model_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?$ ]]; }
+
+# Print an Ollama Modelfile that wraps BASE with the system prompt in FILE.
+render_modelfile() {
+  local base="$1" prompt_file="$2" temperature="$3" num_ctx="$4"
+  valid_model_name "$base" || die "Invalid model name '$base'."
+  [[ -s "$prompt_file" ]] || die "Prompt file $prompt_file is missing or empty."
+  [[ "$temperature" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "Invalid temperature '$temperature'."
+  if ! [[ "$num_ctx" =~ ^[0-9]+$ ]] || ((num_ctx < 1024)); then die "OLLAMA_CONTEXT_LENGTH must be a number of at least 1024."; fi
+  # A Modelfile SYSTEM block ends at the next triple quote.
+  if grep -q '"""' "$prompt_file"; then die "$prompt_file contains \"\"\", which would end the system prompt early."; fi
+  printf 'FROM %s\nPARAMETER temperature %s\nPARAMETER num_ctx %s\nSYSTEM """\n' "$base" "$temperature" "$num_ctx"
+  cat "$prompt_file"
+  printf '"""\n'
+}
+
+# ------------------------------------------------------------ .env file ----
+env_get() {
+  [[ -f "$ENV_FILE" ]] || return 0
+  awk -v key="$1" 'index($0, key "=") == 1 { value = substr($0, length(key) + 2) } END { print value }' "$ENV_FILE"
+}
+
+env_set() {
+  local key="$1" value="$2" tmp
+  [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "Invalid setting name '$key'."
+  [[ "$value" != *$'\n'* ]] || die "Setting $key cannot contain a line break."
+  [[ -f "$ENV_FILE" ]] || die "$ENV_FILE does not exist; run ./stack install."
+  tmp="$(mktemp "$ENV_FILE.XXXXXX")"
+  chmod 600 "$tmp"
+  awk -v key="$key" -v value="$value" '
+    index($0, key "=") == 1 { if (!done) print key "=" value; done = 1; next }
+    { print }
+    END { if (!done) print key "=" value }' "$ENV_FILE" >"$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
+random_hex() {
+  if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32; else od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; fi
+}
+
+# Create .env from the example once, then fill any empty secret. Never
+# replaces an existing secret: changing one would lock you out of saved data.
+ensure_env() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    cp "$ENV_EXAMPLE" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    info "Created $ENV_FILE"
+  fi
+  local key
+  for key in "${SECRET_KEYS[@]}"; do
+    [[ -n "$(env_get "$key")" ]] || env_set "$key" "$(random_hex)"
+  done
+  mkdir -p "$GENERATED_DIR"
+}
+
+# A setting from .env, or from .env.example before install creates .env.
+setting_or_default() {
+  if [[ -f "$ENV_FILE" ]]; then env_get "$1"; else awk -F= -v key="$1" '$1 == key { print substr($0, length(key) + 2) }' "$ENV_EXAMPLE"; fi
+}
+
+require_env() { [[ -f "$ENV_FILE" ]] || die "Not installed yet: run sudo ./stack install"; }
+
+# --------------------------------------------------------------- docker ----
+compose() {
+  COMPOSE_PROFILES="$(env_get COMPOSE_PROFILES)" \
+    docker compose --project-name "$PROJECT" --project-directory "$STACK_DIR" \
+    --env-file "$ENV_FILE" -f "$STACK_DIR/compose.yaml" "$@"
+}
+
+ollama_cli() { compose exec -T ollama ollama "$@"; }
+
+container_health() {
+  local id
+  id="$(compose ps -q "$1" 2>/dev/null || true)"
+  [[ -n "$id" ]] || { echo missing; return; }
+  docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo missing
+}
+
+wait_healthy() {
+  local service="$1" timeout="${2:-300}" waited=0 state
+  while ((waited < timeout)); do
+    state="$(container_health "$service")"
+    case "$state" in
+      healthy | running) return 0 ;;
+      unhealthy | exited | dead) die "$service is $state. See: ./stack logs $service" ;;
+    esac
+    sleep 5
+    waited=$((waited + 5))
+  done
+  die "$service did not become healthy within ${timeout}s. See: ./stack logs $service"
+}
+
+enabled_services() {
+  local profile profiles services=(ollama qdrant)
+  IFS=',' read -r -a profiles <<<"$(env_get COMPOSE_PROFILES)"
+  for profile in "${profiles[@]}"; do [[ -n "$profile" ]] && services+=("$(profile_service "$profile")"); done
+  printf '%s\n' "${services[@]}"
+}
+
+model_present() {
+  local list
+  list="$(ollama_cli list | awk 'NR > 1 { print $1 }')"
+  grep -Fxq -e "$1" -e "$1:latest" <<<"$list"
+}
+
+# ------------------------------------------------------------- commands ----
+cmd_up() {
+  require_env
+  mkdir -p "$GENERATED_DIR"
+  info "Starting: $(enabled_services | tr '\n' ' ')"
+  compose up -d --remove-orphans
+  local service
+  while read -r service; do wait_healthy "$service" 600; done < <(enabled_services)
+  info "All services are healthy."
+}
+
+cmd_down() { require_env; compose stop; }
+
+cmd_models() {
+  require_env
+  local chat embed ctx entry name file temperature
+  chat="$(env_get CHAT_MODEL)" embed="$(env_get EMBED_MODEL)" ctx="$(env_get OLLAMA_CONTEXT_LENGTH)"
+  for name in "$chat" "$embed"; do
+    valid_model_name "$name" || die "Invalid model name '$name' in $ENV_FILE."
+    if model_present "$name"; then
+      info "Model $name is already downloaded."
+    else
+      info "Downloading model $name (this can take a few minutes)..."
+      ollama_cli pull "$name" || die "Could not download $name. Check the name at https://ollama.com/library and your internet connection."
+    fi
+  done
+  mkdir -p "$GENERATED_DIR"
+  for entry in "${ASSISTANTS[@]}"; do
+    IFS='|' read -r name file temperature <<<"$entry"
+    render_modelfile "$chat" "$STACK_DIR/$file" "$temperature" "${ctx:-4096}" >"$GENERATED_DIR/$name.Modelfile"
+    info "Creating assistant '$name' from $chat"
+    ollama_cli create "$name" -f "/stack/generated/$name.Modelfile" >/dev/null || die "Ollama could not create the '$name' assistant."
+  done
+  info "Assistants ready: coder, debugger"
+}
+
+check_os() {
+  local id version
+  id="$(awk -F= '$1 == "ID" { gsub(/"/, "", $2); print $2 }' "$OS_RELEASE")"
+  version="$(awk -F= '$1 == "VERSION_ID" { gsub(/"/, "", $2); print $2 }' "$OS_RELEASE")"
+  if [[ "$id" != ubuntu ]]; then
+    warn "This tool is written for Ubuntu; found '${id:-unknown}'."
+    return 1
+  fi
+  [[ "$version" == 24.04 || "$version" == 22.04 ]] || warn "Tested for Ubuntu 24.04; found $version."
+}
+
+ensure_swap() {
+  local gib="$1" file=/swapfile-local-ai
+  ((gib > 0)) || return 0
+  if [[ -f "$file" ]]; then
+    swapon --show=NAME --noheadings | grep -Fxq "$file" || swapon "$file"
+    return 0
+  fi
+  info "Creating ${gib} GiB of swap at $file"
+  fallocate -l "${gib}G" "$file" || dd if=/dev/zero of="$file" bs=1M count=$((gib * 1024)) status=none
+  chmod 600 "$file"
+  mkswap "$file" >/dev/null
+  swapon "$file"
+  if ! grep -Fq "$file" /etc/fstab; then
+    cp /etc/fstab "/etc/fstab.local-ai-stack.bak"
+    printf '%s none swap sw 0 0\n' "$file" >>/etc/fstab
+  fi
+  printf 'vm.swappiness=10\n' >/etc/sysctl.d/99-local-ai-stack.conf
+  sysctl -q -p /etc/sysctl.d/99-local-ai-stack.conf
+}
+
+install_docker() {
+  info "Installing Docker from Docker's official Ubuntu repository"
+  apt-get update -q
+  apt-get install -y -q ca-certificates curl
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  local codename
+  codename="$(awk -F= '$1 == "VERSION_CODENAME" { print $2 }' "$OS_RELEASE")"
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
+    "$(dpkg --print-architecture)" "$codename" >/etc/apt/sources.list.d/docker.list
+  apt-get update -q
+  apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker
+}
+
+cmd_install() {
+  local no_swap=false force=false arg
+  for arg in "$@"; do
+    case "$arg" in
+      --yes | -y) ASSUME_YES=true ;;
+      --no-swap) no_swap=true ;;
+      --force) force=true ;;
+      *) die "Unknown install option '$arg'." ;;
+    esac
+  done
+  [[ $EUID -eq 0 ]] || die "Install needs root: run sudo ./stack install"
+  check_os || [[ "$force" == true ]] || die "Rerun with --force to try anyway."
+
+  local ram swap cpus disk_gib swap_gib need_docker=false
+  ram="$(ram_mib)" swap="$(swap_mib)" cpus="$(nproc)"
+  disk_gib="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+  swap_gib=0
+  [[ "$no_swap" == true ]] || swap_gib="$(swap_plan_gib "$ram" "$swap")"
+  docker compose version >/dev/null 2>&1 || need_docker=true
+
+  ((ram >= 1700)) || [[ "$force" == true ]] || die "At least 2 GB of RAM is needed; this server has ${ram} MiB."
+  ((disk_gib >= 20)) || [[ "$force" == true ]] || die "At least 20 GB of free disk is needed; found ${disk_gib} GB."
+
+  info "Server: ${cpus} CPUs, ${ram} MiB RAM, ${swap} MiB swap, ${disk_gib} GB free disk"
+  printf '\nThis will:\n'
+  [[ "$need_docker" == true ]] && printf '  - install Docker (docker-ce and the compose plugin) from download.docker.com\n'
+  ((swap_gib > 0)) && printf '  - create a %s GiB swap file at /swapfile-local-ai and add it to /etc/fstab (backup kept)\n' "$swap_gib"
+  printf '  - create %s with random secrets (only if missing)\n' "$ENV_FILE"
+  printf '  - download and start Ollama, Qdrant and Open WebUI (about 6 GB)\n'
+  printf '  - download the %s and %s models and build the coder and debugger assistants\n' \
+    "$(setting_or_default CHAT_MODEL)" "$(setting_or_default EMBED_MODEL)"
+  printf '  Web pages stay private to this server; reach them with ./stack tunnel.\n\n'
+  confirm "Continue?" || die "Cancelled; nothing was changed."
+
+  [[ "$need_docker" == true ]] && install_docker
+  ensure_swap "$swap_gib"
+  ensure_env
+  cmd_up
+  cmd_models
+  printf '\n'
+  info "Done. Next: run ./stack tunnel and follow its instructions to open the chat."
+  ((ram < 3500)) && warn "With ${ram} MiB of RAM, answers take a while: expect a few words per second."
+  return 0
+}
+
+cmd_enable() {
+  local profile="${1:-}" force=false ram problem
+  [[ -n "$profile" ]] || die "Usage: ./stack enable chat|automation|image|openclaw [--force]"
+  [[ "${2:-}" == --force ]] && force=true
+  profile_min_ram_mib "$profile" >/dev/null
+  require_env
+  ram="$(ram_mib)"
+  problem="$(profile_ram_problem "$profile" "$ram")" || exit 1
+  if [[ -n "$problem" ]]; then
+    [[ "$force" == true ]] || die "$problem Add --force to try anyway."
+    warn "$problem Continuing because of --force."
+  fi
+  if [[ "$profile" == openclaw ]]; then enable_openclaw; return; fi
+  env_set COMPOSE_PROFILES "$(list_add "$(env_get COMPOSE_PROFILES)" "$profile")"
+  [[ "$profile" == image ]] && info "Building ComfyUI (downloads about 3 GB; takes a while)..." && compose build comfyui
+  cmd_up
+}
+
+cmd_disable() {
+  local profile="${1:-}" service
+  [[ -n "$profile" ]] || die "Usage: ./stack disable chat|automation|image"
+  require_env
+  service="$(profile_service "$profile")"
+  env_set COMPOSE_PROFILES "$(list_remove "$(env_get COMPOSE_PROFILES)" "$profile")"
+  compose --profile "$profile" rm --stop --force "$service"
+  info "Stopped $service. Its data is kept; ./stack enable $profile brings it back."
+}
+
+node_version_ok() {
+  # OpenClaw's package.json requires Node >=24.16.0 <25 or >=26.1.0.
+  local major minor
+  IFS=. read -r major minor _ <<<"$1"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  ((major == 24 && minor >= 16)) || ((major == 26 && minor >= 1)) || ((major > 26))
+}
+
+enable_openclaw() {
+  command -v node >/dev/null 2>&1 || die "OpenClaw needs Node.js 24.16+ on the server. Install Node.js 24 first."
+  local version
+  version="$(node -p 'process.versions.node')"
+  node_version_ok "$version" || die "OpenClaw needs Node.js 24.16+ (or 26.1+); this server has $version."
+  confirm "Install the OpenClaw package globally with npm?" || die "Cancelled."
+  local npm_args=(install -g openclaw@latest) npm_major npm_minor
+  # OpenClaw's README: npm 11.16+ must allow its install script explicitly.
+  IFS=. read -r npm_major npm_minor _ <<<"$(npm --version)"
+  if ((npm_major > 11 || (npm_major == 11 && npm_minor >= 16))); then npm_args+=(--allow-scripts=openclaw); fi
+  npm "${npm_args[@]}" || die "npm could not install OpenClaw."
+  cat <<EOF
+
+OpenClaw is installed. Finish setup yourself, because onboarding asks you to
+accept the risks of an agent that runs commands on this server:
+
+  openclaw onboard --install-daemon
+
+Choose Ollama, "Local only", base URL http://127.0.0.1:$(env_get OLLAMA_PORT), and a
+model that supports tools with at least 16K of context.
+EOF
+}
+
+cmd_status() {
+  require_env
+  compose ps
+  printf '\n'
+  free -m
+  printf '\nModels loaded right now:\n'
+  ollama_cli ps || true
+}
+
+http_status() { curl -s -o /dev/null -m 10 -w '%{http_code}' "$@" || true; }
+
+cmd_doctor() {
+  require_env
+  local failures=0 ram swap disk service state name key code port
+  info "Checking the local AI stack"
+  if docker info >/dev/null 2>&1; then ok "Docker is running"; else fail "Docker is not running: systemctl start docker"; exit 1; fi
+  ram="$(ram_mib)" swap="$(swap_mib)"
+  if ((ram < 3500 && swap < 2048)); then warn "${ram} MiB RAM and ${swap} MiB swap: models may fail to load. Run sudo ./stack install again to add swap."; else ok "Memory: ${ram} MiB RAM, ${swap} MiB swap"; fi
+  disk="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+  if ((disk >= 10)); then ok "Free disk: ${disk} GB"; else warn "Only ${disk} GB of disk left"; fi
+  while read -r service; do
+    state="$(container_health "$service")"
+    if [[ "$state" == healthy || "$state" == running ]]; then ok "$service is $state"; else fail "$service is $state (./stack logs $service)"; failures=$((failures + 1)); fi
+  done < <(enabled_services)
+  if [[ "$(container_health ollama)" == healthy ]]; then
+    for name in "$(env_get CHAT_MODEL)" "$(env_get EMBED_MODEL)" coder debugger; do
+      if model_present "$name"; then ok "Model $name is installed"; else fail "Model $name is missing (./stack models)"; failures=$((failures + 1)); fi
+    done
+  fi
+  key="$(env_get QDRANT_API_KEY)" port="$(env_get QDRANT_PORT)"
+  code="$(http_status -H "api-key: $key" "http://127.0.0.1:${port:-6333}/collections")"
+  if [[ "$code" == 200 ]]; then ok "Qdrant answers with its API key"; else fail "Qdrant did not answer (HTTP $code)"; failures=$((failures + 1)); fi
+  code="$(http_status "http://127.0.0.1:${port:-6333}/collections")"
+  if [[ "$code" == 401 || "$code" == 403 ]]; then ok "Qdrant refuses requests without the key"; else fail "Qdrant answered without its API key (HTTP $code)"; failures=$((failures + 1)); fi
+  if list_has "$(env_get COMPOSE_PROFILES)" chat; then
+    port="$(env_get WEBUI_PORT)"
+    code="$(http_status "http://127.0.0.1:${port:-3000}/health")"
+    if [[ "$code" == 200 ]]; then ok "Open WebUI answers on port ${port:-3000}"; else fail "Open WebUI did not answer (HTTP $code)"; failures=$((failures + 1)); fi
+  fi
+  if [[ "$(env_get BIND_ADDRESS)" != 127.0.0.1 ]]; then
+    warn "BIND_ADDRESS is $(env_get BIND_ADDRESS): web pages are reachable from the network and Docker bypasses ufw for them."
+  fi
+  if ((failures > 0)); then
+    fail "$failures problem(s) found"
+    exit 1
+  fi
+  info "Everything looks good."
+}
+
+cmd_ask() {
+  local assistant="${1:-}" prompt
+  [[ "$assistant" == coder || "$assistant" == debugger ]] || die "Usage: ./stack ask coder|debugger \"your question\"   (or pipe text in)"
+  shift
+  require_env
+  if (($# > 0)); then prompt="$*"; elif [[ ! -t 0 ]]; then prompt="$(cat)"; else die "Give a question, or pipe text in: ./stack ask debugger < error.txt"; fi
+  [[ -n "${prompt//[[:space:]]/}" ]] || die "The question is empty."
+  printf '%s' "$prompt" | ollama_cli run "$assistant"
+}
+
+cmd_tunnel() {
+  require_env
+  local host user
+  host="$(hostname -I 2>/dev/null | awk '{ print $1 }')"
+  user="${SUDO_USER:-$(id -un)}"
+  cat <<EOF
+Run this on YOUR computer (not the server) and leave it open:
+
+  ssh -N -L $(env_get WEBUI_PORT):127.0.0.1:$(env_get WEBUI_PORT) -L $(env_get N8N_PORT):127.0.0.1:$(env_get N8N_PORT) -L $(env_get COMFYUI_PORT):127.0.0.1:$(env_get COMFYUI_PORT) -L $(env_get OLLAMA_PORT):127.0.0.1:$(env_get OLLAMA_PORT) ${user}@${host:-YOUR_SERVER_IP}
+
+Then open in your browser:
+  Chat (Open WebUI)  http://localhost:$(env_get WEBUI_PORT)   the first account you create becomes the admin
+  n8n                http://localhost:$(env_get N8N_PORT)     if enabled
+  ComfyUI            http://localhost:$(env_get COMFYUI_PORT)  if enabled
+
+Cline in VS Code: API Provider "Ollama", Base URL http://localhost:$(env_get OLLAMA_PORT), model "coder".
+EOF
+}
+
+cmd_backup() {
+  require_env
+  local stamp volume image services
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  image="$(env_get OLLAMA_IMAGE)"
+  mkdir -p "$BACKUP_DIR"
+  services="$(enabled_services | grep -vx ollama || true)"
+  info "Pausing services so the copy is consistent"
+  # shellcheck disable=SC2086
+  compose stop $services
+  for volume in qdrant open-webui n8n; do
+    docker volume inspect "${PROJECT}_${volume}" >/dev/null 2>&1 || continue
+    info "Saving $volume"
+    docker run --rm -v "${PROJECT}_${volume}:/data:ro" -v "$BACKUP_DIR:/backup" --entrypoint tar "${image:-ollama/ollama:0.40.16}" \
+      czf "/backup/${volume}-${stamp}.tar.gz" -C /data .
+  done
+  cmd_up
+  info "Backups are in $BACKUP_DIR (models are not included; ./stack models downloads them again)."
+}
+
+cmd_update() {
+  require_env
+  info "Downloading newer images"
+  compose pull --ignore-buildable
+  list_has "$(env_get COMPOSE_PROFILES)" image && compose build --pull comfyui
+  cmd_up
+  cmd_models
+  docker image prune -f >/dev/null
+}
+
+cmd_uninstall() {
+  require_env
+  local purge=false
+  [[ "${1:-}" == --purge ]] && purge=true
+  if [[ "$purge" == true ]]; then
+    confirm "Delete ALL chats, documents, workflows and models? This cannot be undone." || die "Cancelled."
+    compose --profile chat --profile automation --profile image down --volumes
+  else
+    compose --profile chat --profile automation --profile image down
+    info "Stopped and removed the containers. Your data is kept; ./stack up restores everything."
+  fi
+}
+
+cmd_help() {
+  cat <<'EOF'
+Usage: ./stack <command>
+
+Setup
+  install [--yes] [--no-swap] [--force]  Install Docker, add swap, start everything (needs sudo)
+  models                                 Download models and rebuild the coder/debugger assistants
+  enable chat|automation|image|openclaw  Turn on Open WebUI, n8n, ComfyUI or OpenClaw
+  disable chat|automation|image          Turn one off (data is kept)
+
+Daily use
+  tunnel                                 How to open the web pages from your computer
+  ask coder|debugger "question"          Ask an assistant from the terminal (or pipe a file in)
+  status                                 Containers, memory and loaded models
+  doctor                                 Check that everything works
+  logs [service]                         Follow a service's log
+
+Maintenance
+  up | down                              Start or stop the stack
+  backup                                 Save chats, documents and workflows to ./backups
+  update                                 Download newer images and rebuild assistants
+  uninstall [--purge]                    Remove containers (--purge also deletes all data)
+EOF
+}
+
+main() {
+  local command="${1:-help}"
+  (($# > 0)) && shift
+  case "$command" in
+    install) cmd_install "$@" ;;
+    up | start) cmd_up ;;
+    down | stop) cmd_down ;;
+    restart) cmd_down && cmd_up ;;
+    models) cmd_models ;;
+    enable) cmd_enable "$@" ;;
+    disable) cmd_disable "$@" ;;
+    status) cmd_status ;;
+    doctor) cmd_doctor ;;
+    ask) cmd_ask "$@" ;;
+    tunnel) cmd_tunnel ;;
+    logs) require_env && compose logs --tail 200 -f "$@" ;;
+    backup) cmd_backup ;;
+    update) cmd_update ;;
+    uninstall) cmd_uninstall "$@" ;;
+    help | -h | --help) cmd_help ;;
+    *) cmd_help >&2; die "Unknown command '$command'." ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
